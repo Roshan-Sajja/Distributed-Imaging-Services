@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 
 #include "dist/common/config.hpp"
@@ -9,7 +11,8 @@ namespace fs = std::filesystem;
 int main() {
     dist::common::EnvLoader loader;
     const auto root = fs::current_path();
-    const auto env_path = root / ".env";
+    const char* env_override = std::getenv("DIST_ENV_PATH");
+    const fs::path env_path = env_override != nullptr ? fs::path(env_override) : root / ".env";
     if (!loader.load_from_file(env_path)) {
         std::cerr << "Failed to read environment file at " << env_path << '\n';
         return 1;

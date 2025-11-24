@@ -17,6 +17,7 @@ option(DIST_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
+include(Dependencies)
 
 add_subdirectory(libs/common)
 add_subdirectory(apps/image_generator)
