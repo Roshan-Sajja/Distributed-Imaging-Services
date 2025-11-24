@@ -1,0 +1,30 @@
+# Build outputs
+build/
+bin/
+out/
+cmake-build-*/
+
+# Compiled objects and libraries
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+*.exe
+*.out
+
+# Debug and profiling
+*.pdb
+*.ilk
+*.dsym
+*.gcno
+*.gcda
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
