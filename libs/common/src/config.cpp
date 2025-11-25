@@ -53,6 +53,8 @@ AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& roo
         to_path(env, "IMAGE_GENERATOR_INPUT_DIR", "./data/images", root_dir);
     cfg.generator.loop_delay_ms =
         to_int(env, "IMAGE_GENERATOR_LOOP_DELAY_MS", cfg.generator.loop_delay_ms);
+    cfg.generator.start_delay_ms =
+        to_int(env, "IMAGE_GENERATOR_START_DELAY_MS", cfg.generator.start_delay_ms);
     cfg.generator.pub_endpoint =
         env.get_or("IMAGE_GENERATOR_PUB_ENDPOINT", "tcp://127.0.0.1:5555");
     cfg.generator.heartbeat_ms =

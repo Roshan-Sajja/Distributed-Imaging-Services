@@ -16,6 +16,7 @@ struct GlobalConfig {
 struct ImageGeneratorConfig {
     std::filesystem::path input_dir;
     int loop_delay_ms = 100;
+    int start_delay_ms = 500;
     std::string pub_endpoint;
     int heartbeat_ms = 2000;
 };

@@ -148,6 +148,11 @@ int main(int argc, char** argv) {
     zmq::socket_t publisher{context, zmq::socket_type::pub};
     publisher.set(zmq::sockopt::sndhwm, 10);
     publisher.bind(config.generator.pub_endpoint);
+    if (config.generator.start_delay_ms > 0) {
+        spdlog::info("Waiting {} ms for subscribers to connect...",
+                     config.generator.start_delay_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(config.generator.start_delay_ms));
+    }
 
     std::size_t frame_id = 0;
     std::size_t loop_iteration = 0;
