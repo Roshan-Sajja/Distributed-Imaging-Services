@@ -2,21 +2,20 @@
 #include <nlohmann/json.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
 #include <atomic>
-#include <chrono>
-#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <unordered_map>
 #include <vector>
 
 #include "dist/common/config.hpp"
 #include "dist/common/env_loader.hpp"
+#include "dist/common/utils.hpp"
 #include "dist/common/version.hpp"
 
 namespace fs = std::filesystem;
@@ -24,37 +23,7 @@ namespace fs = std::filesystem;
 namespace {
 
 std::atomic_bool g_keep_running{true};
-
-void handle_signal(int) {
-    g_keep_running.store(false);
-}
-
-std::string now_iso8601() {
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    gmtime_s(&tm, &time);
-#else
-    gmtime_r(&time, &tm);
-#endif
-    char buffer[32];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tm);
-    return std::string(buffer);
-}
-
-spdlog::level::level_enum level_from_string(std::string_view value) {
-    static const std::unordered_map<std::string_view, spdlog::level::level_enum> map{
-        {"trace", spdlog::level::trace}, {"debug", spdlog::level::debug},
-        {"info", spdlog::level::info},   {"warn", spdlog::level::warn},
-        {"error", spdlog::level::err},   {"critical", spdlog::level::critical},
-    };
-
-    if (auto it = map.find(value); it != map.end()) {
-        return it->second;
-    }
-    return spdlog::level::info;
-}
+constexpr std::size_t kMaxPayloadBytes = 50 * 1024 * 1024;  // 50 MB safety cap
 
 }  // namespace
 
@@ -84,19 +53,20 @@ int main(int argc, char** argv) {
     const auto config = dist::common::load_app_config(loader, root);
     const auto resolved_level =
         cli_log_level.empty() ? config.global.log_level : cli_log_level;
-    spdlog::set_level(level_from_string(resolved_level));
+    spdlog::set_level(dist::common::level_from_string(resolved_level));
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
 
-    std::signal(SIGINT, handle_signal);
-    std::signal(SIGTERM, handle_signal);
+    dist::common::install_signal_handlers(g_keep_running);
 
     zmq::context_t context{1};
     zmq::socket_t subscriber{context, zmq::socket_type::sub};
+    subscriber.set(zmq::sockopt::rcvtimeo, 500);
     subscriber.set(zmq::sockopt::subscribe, "");
     subscriber.connect(config.extractor.sub_endpoint);
 
     zmq::socket_t publisher{context, zmq::socket_type::push};
     publisher.set(zmq::sockopt::sndhwm, 100);
+    publisher.set(zmq::sockopt::sndtimeo, 1000);
     publisher.set(zmq::sockopt::linger, 0);
     publisher.set(zmq::sockopt::immediate, 1);
     publisher.connect(config.extractor.pub_endpoint);
@@ -118,6 +88,10 @@ int main(int argc, char** argv) {
 
         try {
             if (!subscriber.recv(header_msg, zmq::recv_flags::none)) {
+                continue;  // timeout or interrupted
+            }
+            if (!header_msg.more()) {
+                spdlog::warn("Discarding message without payload part");
                 continue;
             }
             if (!subscriber.recv(image_msg, zmq::recv_flags::none)) {
@@ -174,21 +148,43 @@ int main(int argc, char** argv) {
             std::memcpy(descriptor_bytes.data(), descriptors.data, descriptor_bytes.size());
         }
 
+        cv::Mat annotated;
+        cv::drawKeypoints(frame,
+                          keypoints,
+                          annotated,
+                          cv::Scalar(0, 255, 0),
+                          cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+        std::vector<std::uint8_t> annotated_bytes;
+        if (!annotated.empty()) {
+            cv::imencode(".png", annotated, annotated_bytes);
+        }
+
         spdlog::info("Processed frame {} ({} keypoints)",
                      source_header.value("frame_id", -1),
                      keypoints.size());
 
         nlohmann::json header = {
             {"source", source_header},
-            {"processed_timestamp", now_iso8601()},
+            {"processed_timestamp", dist::common::now_iso8601()},
             {"keypoint_count", keypoints.size()},
             {"descriptor_rows", descriptors.rows},
             {"descriptor_cols", descriptors.cols},
             {"descriptor_elem_size", descriptors.elemSize()},
             {"descriptor_type", descriptors.type()},
             {"descriptors_bytes", descriptor_bytes.size()},
+            {"annotated_bytes", annotated_bytes.size()},
             {"keypoints", std::move(keypoints_json)},
         };
+
+        const std::size_t payload_bytes =
+            descriptor_bytes.size() + encoded.size() + annotated_bytes.size();
+        if (payload_bytes > kMaxPayloadBytes) {
+            spdlog::warn("Processed payload too large ({} bytes > {}), dropping frame {}",
+                         payload_bytes,
+                         kMaxPayloadBytes,
+                         source_header.value("frame_id", -1));
+            continue;
+        }
 
         std::vector<zmq::message_t> multipart;
         multipart.emplace_back(header.dump());
@@ -198,9 +194,13 @@ int main(int argc, char** argv) {
         }
         multipart.emplace_back(encoded.size());
         std::memcpy(multipart.back().data(), encoded.data(), encoded.size());
+        if (!annotated_bytes.empty()) {
+            multipart.emplace_back(annotated_bytes.size());
+            std::memcpy(multipart.back().data(), annotated_bytes.data(), annotated_bytes.size());
+        }
 
         try {
-            zmq::send_multipart(publisher, multipart, zmq::send_flags::dontwait);
+            zmq::send_multipart(publisher, multipart, zmq::send_flags::none);
         } catch (const zmq::error_t& ex) {
             if (ex.num() == EAGAIN) {
                 spdlog::warn(
@@ -218,4 +218,3 @@ int main(int argc, char** argv) {
     spdlog::info("Feature extractor shutting down");
     return 0;
 }
-

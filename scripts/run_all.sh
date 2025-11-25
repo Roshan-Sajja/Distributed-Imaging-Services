@@ -5,6 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 BIN_DIR="${BIN_DIR:-${BUILD_DIR}/bin}"
 ENV_PATH="${DIST_ENV_PATH:-${ROOT_DIR}/.env}"
+GENERATOR_ARGS=()
+
+if [[ "${1:-}" == "--once" ]]; then
+    GENERATOR_ARGS+=(--once)
+fi
 
 for exe in image_generator feature_extractor data_logger; do
     if [[ ! -x "${BIN_DIR}/${exe}" ]]; then
@@ -38,9 +43,10 @@ trap cleanup EXIT INT TERM
 PIDS+=($!)
 ("${BIN_DIR}/feature_extractor") &
 PIDS+=($!)
-("${BIN_DIR}/image_generator") &
+("${BIN_DIR}/image_generator" "${GENERATOR_ARGS[@]}") &
 PIDS+=($!)
 
-wait -n "${PIDS[@]}"
+for pid in "${PIDS[@]}"; do
+    wait "${pid}"
+done
 cleanup
-

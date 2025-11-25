@@ -8,18 +8,15 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <cstring>
-#include <iostream>
-#include <random>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include "dist/common/config.hpp"
 #include "dist/common/env_loader.hpp"
+#include "dist/common/utils.hpp"
 #include "dist/common/version.hpp"
 
 namespace fs = std::filesystem;
@@ -28,10 +25,7 @@ using namespace std::chrono_literals;
 namespace {
 
 std::atomic_bool g_keep_running{true};
-
-void handle_signal(int) {
-    g_keep_running.store(false);
-}
+constexpr std::size_t kMaxPayloadBytes = 50 * 1024 * 1024;  // 50 MB safety cap
 
 std::vector<fs::path> collect_images(const fs::path& dir) {
     std::vector<fs::path> images;
@@ -68,34 +62,7 @@ std::vector<fs::path> collect_images(const fs::path& dir) {
     return images;
 }
 
-std::string now_iso8601() {
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    gmtime_s(&tm, &time);
-#else
-    gmtime_r(&time, &tm);
-#endif
-    char buffer[32];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tm);
-    return std::string(buffer);
-}
-
 }  // namespace
-
-spdlog::level::level_enum level_from_string(std::string_view value) {
-    static const std::unordered_map<std::string_view, spdlog::level::level_enum> map{
-        {"trace", spdlog::level::trace}, {"debug", spdlog::level::debug},
-        {"info", spdlog::level::info},   {"warn", spdlog::level::warn},
-        {"error", spdlog::level::err},   {"critical", spdlog::level::critical},
-    };
-
-    if (auto it = map.find(value); it != map.end()) {
-        return it->second;
-    }
-    return spdlog::level::info;
-}
 
 int main(int argc, char** argv) {
     CLI::App app{"Image Generator - publishes frames via ZeroMQ"};
@@ -127,7 +94,7 @@ int main(int argc, char** argv) {
     const auto resolved_level =
         cli_log_level.empty() ? config.global.log_level : cli_log_level;
 
-    spdlog::set_level(level_from_string(resolved_level));
+    spdlog::set_level(dist::common::level_from_string(resolved_level));
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
 
     spdlog::info("[image_generator] Dist Imaging Services v{}", dist::common::version());
@@ -141,12 +108,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::signal(SIGINT, handle_signal);
-    std::signal(SIGTERM, handle_signal);
+    dist::common::install_signal_handlers(g_keep_running);
 
     zmq::context_t context{1};
     zmq::socket_t publisher{context, zmq::socket_type::pub};
     publisher.set(zmq::sockopt::sndhwm, 10);
+    publisher.set(zmq::sockopt::sndtimeo, 1000);
     publisher.bind(config.generator.pub_endpoint);
     if (config.generator.start_delay_ms > 0) {
         spdlog::info("Waiting {} ms for subscribers to connect...",
@@ -175,11 +142,18 @@ int main(int argc, char** argv) {
                 spdlog::warn("Failed to encode image {}", image_path.string());
                 continue;
             }
+            if (encoded.size() > kMaxPayloadBytes) {
+                spdlog::warn("Encoded image {} is too large ({} bytes > {}), skipping",
+                             image_path.string(),
+                             encoded.size(),
+                             kMaxPayloadBytes);
+                continue;
+            }
 
             nlohmann::json header{
                 {"frame_id", frame_id},
                 {"loop_iteration", loop_iteration},
-                {"timestamp", now_iso8601()},
+                {"timestamp", dist::common::now_iso8601()},
                 {"filename", image_path.filename().string()},
                 {"width", frame.cols},
                 {"height", frame.rows},
@@ -219,4 +193,3 @@ int main(int argc, char** argv) {
     spdlog::info("Generator shutting down (frames sent: {})", frame_id);
     return 0;
 }
-
