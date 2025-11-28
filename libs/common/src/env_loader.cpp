@@ -34,10 +34,8 @@ bool EnvLoader::load_from_file(const std::filesystem::path& path) {
 bool EnvLoader::load_from_string(std::string_view buffer) {
     std::istringstream stream{std::string(buffer)};
     std::string line;
-    size_t line_number = 0;
 
     while (std::getline(stream, line)) {
-        ++line_number;
         if (is_comment_or_empty(line)) {
             continue;
         }

@@ -5,6 +5,7 @@
 #include <zmq.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "dist/common/config.hpp"
 #include "dist/common/env_loader.hpp"
@@ -23,6 +25,26 @@ namespace fs = std::filesystem;
 namespace {
 
 std::atomic_bool g_keep_running{true};
+constexpr auto kZmqRetryBackoff = std::chrono::seconds(1);
+
+bool connect_with_retry(zmq::socket_t& socket, const std::string& endpoint) {
+    int attempt = 1;
+    while (g_keep_running.load()) {
+        try {
+            socket.connect(endpoint);
+            return true;
+        } catch (const zmq::error_t& ex) {
+            spdlog::warn("Failed to connect SUB socket to {} (attempt {}): {}. Waiting for feature "
+                         "extractor...",
+                         endpoint,
+                         attempt,
+                         ex.what());
+            ++attempt;
+            std::this_thread::sleep_for(kZmqRetryBackoff);
+        }
+    }
+    return false;
+}
 
 std::string sanitize_filename(std::string value) {
     for (char& ch : value) {
@@ -104,6 +126,7 @@ int main(int argc, char** argv) {
 
     try {
         fs::create_directories(config.logger.raw_image_dir);
+        fs::create_directories(config.logger.annotated_image_dir);
         if (!config.logger.db_path.parent_path().empty()) {
             fs::create_directories(config.logger.db_path.parent_path());
         }
@@ -147,21 +170,22 @@ int main(int argc, char** argv) {
     }
 
     zmq::context_t context{1};
-    zmq::socket_t sink{context, zmq::socket_type::pull};
+    zmq::socket_t sink{context, zmq::socket_type::sub};
     sink.set(zmq::sockopt::rcvhwm, 100);
     sink.set(zmq::sockopt::rcvtimeo, 500);
     sink.set(zmq::sockopt::linger, 0);
-    try {
-        sink.bind(config.logger.sub_endpoint);
-    } catch (const zmq::error_t& ex) {
-        spdlog::error("Failed to bind PULL socket on {}: {}", config.logger.sub_endpoint, ex.what());
+    sink.set(zmq::sockopt::subscribe, "");
+    if (!connect_with_retry(sink, config.logger.sub_endpoint)) {
         return 1;
     }
 
     spdlog::info("[data_logger] Dist Imaging Services v{}", dist::common::version());
     spdlog::info("Listening for processed frames on {}", config.logger.sub_endpoint);
     spdlog::info("Saving PNGs to {}", config.logger.raw_image_dir.string());
+    spdlog::info("Saving annotated PNGs to {}", config.logger.annotated_image_dir.string());
     spdlog::info("Persisting metadata to {}", config.logger.db_path.string());
+
+    auto last_wait_log = std::chrono::steady_clock::now();
 
     while (g_keep_running.load()) {
         zmq::message_t header_msg;
@@ -172,6 +196,11 @@ int main(int argc, char** argv) {
 
         try {
             if (!sink.recv(header_msg, zmq::recv_flags::none)) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last_wait_log > std::chrono::seconds(5)) {
+                    spdlog::info("Waiting for processed frames on {}", config.logger.sub_endpoint);
+                    last_wait_log = now;
+                }
                 continue;  // timeout
             }
             if (!header_msg.more()) {
@@ -207,7 +236,8 @@ int main(int argc, char** argv) {
             break;
         }
 
-        spdlog::debug("Received 3 parts from extractor");
+        const int part_count = has_annotated ? 4 : 3;
+        spdlog::debug("Received {} parts from extractor", part_count);
 
         nlohmann::json header;
         try {
@@ -253,11 +283,12 @@ int main(int argc, char** argv) {
         out.close();
 
         fs::path annotated_path;
+        bool annotated_saved = false;
         if (has_annotated && annotated_msg.size() > 0) {
             std::ostringstream aoss;
             aoss << "frame_" << std::setw(6) << std::setfill('0') << std::max(frame_id, 0) << "_"
                  << sanitize_filename(processed_timestamp) << "_annotated.png";
-            annotated_path = config.logger.raw_image_dir / aoss.str();
+            annotated_path = config.logger.annotated_image_dir / aoss.str();
 
             std::ofstream annotated_out(annotated_path, std::ios::binary);
             if (!annotated_out.good()) {
@@ -266,7 +297,10 @@ int main(int argc, char** argv) {
                 annotated_out.write(static_cast<const char*>(annotated_msg.data()),
                                     static_cast<std::streamsize>(annotated_msg.size()));
                 annotated_out.close();
+                annotated_saved = true;
             }
+        }
+        if (annotated_saved) {
             header["annotated_path"] = annotated_path.string();
         }
 

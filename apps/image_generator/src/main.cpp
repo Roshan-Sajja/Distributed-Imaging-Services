@@ -11,6 +11,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <cstring>
+#include <deque>
+#include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -26,6 +29,83 @@ namespace {
 
 std::atomic_bool g_keep_running{true};
 constexpr std::size_t kMaxPayloadBytes = 50 * 1024 * 1024;  // 50 MB safety cap
+constexpr auto kNoSubscriberBackoff = 500ms;               // Slow down when nobody is listening
+constexpr std::size_t kDefaultQueueDepth = 100;
+constexpr int kZmqRetryAttempts = 3;
+constexpr auto kZmqRetryBackoff = 1s;
+
+bool bind_with_retry(zmq::socket_t& socket, const std::string& endpoint) {
+    for (int attempt = 1; attempt <= kZmqRetryAttempts; ++attempt) {
+        try {
+            socket.bind(endpoint);
+            return true;
+        } catch (const zmq::error_t& ex) {
+            spdlog::error(
+                "Unable to bind PUB socket to {} (attempt {}/{}): {}. Is another instance running "
+                "on this endpoint?",
+                endpoint,
+                attempt,
+                kZmqRetryAttempts,
+                ex.what());
+            if (attempt == kZmqRetryAttempts) {
+                break;
+            }
+            std::this_thread::sleep_for(kZmqRetryBackoff);
+        }
+    }
+    return false;
+}
+
+class SubscriberMonitor : public zmq::monitor_t {
+  public:
+    void start(zmq::socket_t& socket) {
+        stop_flag_.store(false);
+        sub_count_.store(0);
+        monitor_thread_ = std::thread([this, &socket]() {
+            try {
+                init(socket,
+                     "inproc://pub_monitor",
+                     ZMQ_EVENT_ACCEPTED | ZMQ_EVENT_CONNECTED | ZMQ_EVENT_DISCONNECTED |
+                         ZMQ_EVENT_CLOSED);
+            } catch (const zmq::error_t& ex) {
+                spdlog::warn("Failed to start socket monitor: {}", ex.what());
+                return;
+            }
+
+            while (!stop_flag_.load()) {
+                check_event(250);
+            }
+        });
+    }
+
+    void stop() {
+        stop_flag_.store(true);
+        if (monitor_thread_.joinable()) {
+            monitor_thread_.join();
+        }
+    }
+
+    bool has_subscriber() const { return sub_count_.load() > 0; }
+
+  protected:
+    void on_event_connected(const zmq_event_t&, const char*) override {
+        sub_count_.fetch_add(1);
+    }
+    void on_event_accepted(const zmq_event_t&, const char*) override {
+        sub_count_.fetch_add(1);
+    }
+    void on_event_disconnected(const zmq_event_t&, const char*) override {
+        sub_count_.fetch_sub(1);
+    }
+    void on_event_closed(const zmq_event_t&, const char*) override {
+        sub_count_.fetch_sub(1);
+    }
+
+  private:
+    std::atomic_int sub_count_{0};
+    std::atomic_bool stop_flag_{false};
+    std::thread monitor_thread_;
+};
 
 std::vector<fs::path> collect_images(const fs::path& dir) {
     std::vector<fs::path> images;
@@ -102,6 +182,27 @@ int main(int argc, char** argv) {
     spdlog::info("Publish endpoint: {}", config.generator.pub_endpoint);
     spdlog::info("Loop delay: {} ms", config.generator.loop_delay_ms);
 
+    std::size_t max_queue_depth = kDefaultQueueDepth;
+    if (config.generator.queue_depth > 0) {
+        max_queue_depth = static_cast<std::size_t>(config.generator.queue_depth);
+    } else {
+        spdlog::warn("IMAGE_GENERATOR_QUEUE_DEPTH={} is invalid; using default {}",
+                     config.generator.queue_depth,
+                     kDefaultQueueDepth);
+    }
+    spdlog::info("Queue depth: {}", max_queue_depth);
+
+    struct MonitorGuard {
+        SubscriberMonitor* monitor = nullptr;
+        ~MonitorGuard() {
+            if (monitor != nullptr) {
+                monitor->stop();
+            }
+        }
+    };
+
+    auto monitor = std::make_unique<SubscriberMonitor>();
+    MonitorGuard monitor_guard{monitor.get()};
     auto images = collect_images(config.generator.input_dir);
     if (images.empty()) {
         spdlog::error("No readable images found under {}", config.generator.input_dir.string());
@@ -114,18 +215,59 @@ int main(int argc, char** argv) {
     zmq::socket_t publisher{context, zmq::socket_type::pub};
     publisher.set(zmq::sockopt::sndhwm, 10);
     publisher.set(zmq::sockopt::sndtimeo, 1000);
-    publisher.bind(config.generator.pub_endpoint);
+    if (!bind_with_retry(publisher, config.generator.pub_endpoint)) {
+        return 1;
+    }
+    monitor->start(publisher);
+    monitor_guard.monitor = monitor.get();
+
     if (config.generator.start_delay_ms > 0) {
         spdlog::info("Waiting {} ms for subscribers to connect...",
                      config.generator.start_delay_ms);
         std::this_thread::sleep_for(std::chrono::milliseconds(config.generator.start_delay_ms));
     }
+    if (config.generator.subscriber_wait_ms > 0) {
+        spdlog::info("Waiting up to {} ms for at least one subscriber...",
+                     config.generator.subscriber_wait_ms);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(config.generator.subscriber_wait_ms);
+        while (!monitor->has_subscriber() && std::chrono::steady_clock::now() < deadline &&
+               g_keep_running.load()) {
+            std::this_thread::sleep_for(50ms);
+        }
+        if (!monitor->has_subscriber()) {
+            spdlog::warn("No subscribers detected before timeout; initial frames may be dropped");
+        } else {
+            spdlog::info("Subscriber detected, starting publish loop");
+        }
+    }
 
     std::size_t frame_id = 0;
     std::size_t loop_iteration = 0;
     const auto delay = std::chrono::milliseconds(config.generator.loop_delay_ms);
+    const auto heartbeat_interval = std::chrono::milliseconds(config.generator.heartbeat_ms);
+    auto last_heartbeat = std::chrono::steady_clock::now();
+    std::deque<std::pair<std::string, std::vector<uchar>>> pending_frames;
 
     while (g_keep_running.load()) {
+        if (monitor->has_subscriber() && !pending_frames.empty()) {
+            spdlog::info("Flushing {} queued frames to new subscriber", pending_frames.size());
+            while (!pending_frames.empty() && monitor->has_subscriber()) {
+                auto [header_str, encoded] = std::move(pending_frames.front());
+                pending_frames.pop_front();
+                zmq::message_t header_msg(header_str);
+                zmq::message_t payload_msg(encoded.size());
+                std::memcpy(payload_msg.data(), encoded.data(), encoded.size());
+                try {
+                    publisher.send(header_msg, zmq::send_flags::sndmore);
+                    publisher.send(payload_msg, zmq::send_flags::none);
+                } catch (const zmq::error_t& ex) {
+                    spdlog::warn("Failed to flush queued frame: {}", ex.what());
+                    break;
+                }
+            }
+        }
+
         for (const auto& image_path : images) {
             if (!g_keep_running.load()) {
                 break;
@@ -164,23 +306,47 @@ int main(int argc, char** argv) {
 
             spdlog::debug("Header: {}", header.dump());
 
-            zmq::message_t header_msg(header.dump());
-            zmq::message_t payload_msg(encoded.size());
-            std::memcpy(payload_msg.data(), encoded.data(), encoded.size());
+            const std::string header_str = header.dump();
 
-            try {
-                publisher.send(header_msg, zmq::send_flags::sndmore);
-                publisher.send(payload_msg, zmq::send_flags::none);
-            } catch (const zmq::error_t& ex) {
-                spdlog::error("ZeroMQ send failed: {}", ex.what());
-                return 1;
+            if (!monitor->has_subscriber()) {
+                if (pending_frames.size() >= max_queue_depth) {
+                    spdlog::warn("Queue full ({} frames); dropping oldest queued frame", max_queue_depth);
+                    pending_frames.pop_front();
+                }
+                pending_frames.emplace_back(header_str, std::move(encoded));
+                spdlog::warn("No subscriber present; queueing frame {}", frame_id);
+                if (kNoSubscriberBackoff.count() > 0) {
+                    std::this_thread::sleep_for(kNoSubscriberBackoff);
+                }
+            } else {
+                zmq::message_t header_msg(header_str);
+                zmq::message_t payload_msg(encoded.size());
+                std::memcpy(payload_msg.data(), encoded.data(), encoded.size());
+
+                try {
+                    publisher.send(header_msg, zmq::send_flags::sndmore);
+                    publisher.send(payload_msg, zmq::send_flags::none);
+                } catch (const zmq::error_t& ex) {
+                    spdlog::error("ZeroMQ send failed: {}", ex.what());
+                    return 1;
+                }
+
+                spdlog::info("Published frame {} ({} bytes)", frame_id, encoded.size());
             }
 
-            spdlog::info("Published frame {} ({} bytes)", frame_id, encoded.size());
             ++frame_id;
 
             if (delay.count() > 0) {
                 std::this_thread::sleep_for(delay);
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (heartbeat_interval.count() > 0 &&
+                now - last_heartbeat >= heartbeat_interval) {
+                spdlog::info("Heartbeat: frames sent={}, loop_iteration={}",
+                             frame_id,
+                             loop_iteration);
+                last_heartbeat = now;
             }
         }
 
@@ -191,5 +357,11 @@ int main(int argc, char** argv) {
     }
 
     spdlog::info("Generator shutting down (frames sent: {})", frame_id);
+    monitor->stop();
+    monitor_guard.monitor = nullptr;
+    monitor.reset();  // Destroy monitor before tearing down ZeroMQ to avoid shutdown hang.
+    publisher.close();
+    context.close();
+    spdlog::info("Generator cleanup complete.");
     return 0;
 }

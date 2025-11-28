@@ -1,7 +1,6 @@
 #include "dist/common/config.hpp"
 
 #include <cstdlib>
-#include <stdexcept>
 
 namespace dist::common {
 
@@ -55,10 +54,16 @@ AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& roo
         to_int(env, "IMAGE_GENERATOR_LOOP_DELAY_MS", cfg.generator.loop_delay_ms);
     cfg.generator.start_delay_ms =
         to_int(env, "IMAGE_GENERATOR_START_DELAY_MS", cfg.generator.start_delay_ms);
+    cfg.generator.subscriber_wait_ms =
+        to_int(env, "IMAGE_GENERATOR_SUBSCRIBER_WAIT_MS", cfg.generator.subscriber_wait_ms);
     cfg.generator.pub_endpoint =
         env.get_or("IMAGE_GENERATOR_PUB_ENDPOINT", "tcp://127.0.0.1:5555");
     cfg.generator.heartbeat_ms =
         to_int(env, "IMAGE_GENERATOR_HEARTBEAT_MS", cfg.generator.heartbeat_ms);
+    const int extractor_queue_fallback =
+        to_int(env, "FEATURE_EXTRACTOR_QUEUE_DEPTH", cfg.generator.queue_depth);
+    cfg.generator.queue_depth =
+        to_int(env, "IMAGE_GENERATOR_QUEUE_DEPTH", extractor_queue_fallback);
 
     cfg.extractor.sub_endpoint =
         env.get_or("FEATURE_EXTRACTOR_SUB_ENDPOINT", "tcp://127.0.0.1:5555");
@@ -70,6 +75,8 @@ AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& roo
         env, "FEATURE_EXTRACTOR_SIFT_CONTRAST_THRESHOLD", cfg.extractor.sift_contrast_threshold);
     cfg.extractor.sift_edge_threshold =
         to_double(env, "FEATURE_EXTRACTOR_SIFT_EDGE_THRESHOLD", cfg.extractor.sift_edge_threshold);
+    cfg.extractor.queue_depth =
+        to_int(env, "FEATURE_EXTRACTOR_QUEUE_DEPTH", cfg.extractor.queue_depth);
 
     cfg.logger.sub_endpoint =
         env.get_or("DATA_LOGGER_SUB_ENDPOINT", "tcp://127.0.0.1:5556");
@@ -77,11 +84,10 @@ AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& roo
         to_path(env, "DATA_LOGGER_DB_PATH", "./storage/dist_imaging.sqlite", root_dir);
     cfg.logger.raw_image_dir =
         to_path(env, "DATA_LOGGER_RAW_IMAGE_DIR", "./storage/raw_frames", root_dir);
-    cfg.logger.prune_days =
-        to_int(env, "DATA_LOGGER_PRUNE_DAYS", cfg.logger.prune_days);
+    cfg.logger.annotated_image_dir =
+        to_path(env, "DATA_LOGGER_ANNOTATED_DIR", "./storage/annotated_frames", root_dir);
 
     return cfg;
 }
 
 }  // namespace dist::common
-
