@@ -2,7 +2,6 @@
 
 #include <filesystem>
 #include <string>
-#include <string_view>
 
 #include "dist/common/env_loader.hpp"
 
@@ -17,8 +16,10 @@ struct ImageGeneratorConfig {
     std::filesystem::path input_dir;
     int loop_delay_ms = 100;
     int start_delay_ms = 500;
+    int subscriber_wait_ms = 1000;
     std::string pub_endpoint;
     int heartbeat_ms = 2000;
+    int queue_depth = 100;
 };
 
 struct FeatureExtractorConfig {
@@ -27,13 +28,14 @@ struct FeatureExtractorConfig {
     int sift_n_features = 0;
     double sift_contrast_threshold = 0.04;
     double sift_edge_threshold = 10.0;
+    int queue_depth = 100;
 };
 
 struct DataLoggerConfig {
     std::string sub_endpoint;
     std::filesystem::path db_path;
     std::filesystem::path raw_image_dir;
-    int prune_days = 30;
+    std::filesystem::path annotated_image_dir;
 };
 
 struct AppConfig {
@@ -47,4 +49,3 @@ struct AppConfig {
                                         const std::filesystem::path& root_dir);
 
 }  // namespace dist::common
-
