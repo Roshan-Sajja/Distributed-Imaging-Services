@@ -12,6 +12,7 @@ echo "Monitoring $DB_PATH (press Ctrl+C to stop)"
 echo ""
 
 while true; do
+    # Poll every few seconds so demo environments have basic observability.
     clear
     echo "=== Frame Count ==="
     sqlite3 "$DB_PATH" "SELECT COUNT(*) as total_frames FROM frames;"

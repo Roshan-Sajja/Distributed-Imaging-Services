@@ -1,11 +1,8 @@
-version: "3.9"
-
 services:
   dist-imaging:
     build:
       context: .
-    working_dir: /workspace
+    working_dir: /app
+    command: ["/app/scripts/run_all.sh"]
     volumes:
-      - .:/workspace
-    command: bash -c "scripts/bootstrap.sh && scripts/build.sh && scripts/run_all.sh"
-
+      - ./storage:/app/storage

@@ -180,8 +180,14 @@ int main(int argc, char** argv) {
     fs::path env_path = resolve_env_path(cli_env_path, env_override, root);
 
     if (!loader.load_from_file(env_path)) {
-        spdlog::error("Failed to read environment file at {}", env_path.string());
-        return 1;
+        spdlog::warn("Failed to read environment file at {}. Falling back to process environment "
+                     "variables.",
+                     env_path.string());
+        if (!loader.load_from_env()) {
+            spdlog::error("No configuration could be loaded. Provide a .env file or pass variables "
+                          "via docker --env-file.");
+            return 1;
+        }
     }
 
     const auto config = dist::common::load_app_config(loader, root);

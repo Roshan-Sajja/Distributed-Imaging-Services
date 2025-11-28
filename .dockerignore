@@ -2,7 +2,6 @@ build
 cmake-build-*
 dist
 storage
-.env
 .git
 .gitignore
 .vscode
@@ -10,5 +9,4 @@ storage
 *.swp
 *.swo
 *.log
-data/images
 

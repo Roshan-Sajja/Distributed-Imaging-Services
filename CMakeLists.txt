@@ -19,6 +19,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 include(Dependencies)
 
+# Applications share the dist::common static library.
 add_subdirectory(libs/common)
 add_subdirectory(apps/image_generator)
 add_subdirectory(apps/feature_extractor)

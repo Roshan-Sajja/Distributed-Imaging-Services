@@ -18,6 +18,8 @@ class EnvLoader {
     [[nodiscard]] bool load_from_file(const std::filesystem::path& path);
     // Parse the given buffer directly (used by tests or in-memory configs).
     [[nodiscard]] bool load_from_string(std::string_view buffer);
+    // Snapshot the current process environment (useful with docker --env-file).
+    [[nodiscard]] bool load_from_env();
 
     [[nodiscard]] std::optional<std::string> get(std::string_view key) const;
     [[nodiscard]] std::string get_or(std::string_view key,

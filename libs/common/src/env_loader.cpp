@@ -3,6 +3,11 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <cstdlib>
+
+#if !defined(_WIN32)
+extern char** environ;
+#endif
 
 namespace dist::common {
 
@@ -53,6 +58,33 @@ bool EnvLoader::load_from_string(std::string_view buffer) {
     }
 
     return true;
+}
+
+bool EnvLoader::load_from_env() {
+#if defined(_WIN32)
+    char** env = _environ;
+#else
+    char** env = ::environ;
+#endif
+    if (env == nullptr) {
+        return false;
+    }
+
+    bool loaded = false;
+    for (char** current = env; *current != nullptr; ++current) {
+        std::string_view entry(*current);
+        const auto pos = entry.find('=');
+        if (pos == std::string::npos) {
+            continue;
+        }
+        std::string key = trim(entry.substr(0, pos));
+        std::string value = std::string(entry.substr(pos + 1));
+        if (!key.empty()) {
+            values_[std::move(key)] = std::move(value);
+            loaded = true;
+        }
+    }
+    return loaded;
 }
 
 std::optional<std::string> EnvLoader::get(std::string_view key) const {
