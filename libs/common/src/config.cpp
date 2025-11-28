@@ -46,8 +46,6 @@ AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& roo
     AppConfig cfg;
 
     cfg.global.log_level = env.get_or("APP_LOG_LEVEL", cfg.global.log_level);
-    cfg.global.metrics_port = to_int(env, "METRICS_HTTP_PORT", cfg.global.metrics_port);
-
     cfg.generator.input_dir =
         to_path(env, "IMAGE_GENERATOR_INPUT_DIR", "./data/images", root_dir);
     cfg.generator.loop_delay_ms =

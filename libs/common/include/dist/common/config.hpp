@@ -9,7 +9,6 @@ namespace dist::common {
 
 struct GlobalConfig {
     std::string log_level = "info";
-    int metrics_port = 9100;
 };
 
 struct ImageGeneratorConfig {

@@ -20,8 +20,6 @@ class EnvLoader {
     [[nodiscard]] std::string get_or(std::string_view key,
                                      std::string_view fallback) const;
 
-    [[nodiscard]] const EnvMap& data() const noexcept { return values_; }
-
   private:
     static std::string trim(std::string_view in);
     EnvMap values_;
