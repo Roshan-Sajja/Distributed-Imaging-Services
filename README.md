@@ -44,7 +44,7 @@ Common flags:
 - `--annotated` (feature_extractor / run_all): emit annotated frames; the logger will write them to `storage/annotated_frames`.
 
 ## Docker
-We bake the code and .env into the image at `/app`.
+I baked the code and .env into the image at `/app`.
 
 Build and run:
 ```bash
