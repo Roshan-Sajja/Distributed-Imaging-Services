@@ -1,5 +1,6 @@
 include_guard(GLOBAL)
 
+# Apply a consistent baseline warning set across all targets.
 function(set_common_warnings target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive- /EHsc)

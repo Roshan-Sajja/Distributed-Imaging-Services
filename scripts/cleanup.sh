@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Remove local artifacts so reruns start from a clean slate.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB_PATH="${1:-${ROOT_DIR}/storage/dist_imaging.sqlite}"
 RAW_DIR="${2:-${ROOT_DIR}/storage/raw_frames}"

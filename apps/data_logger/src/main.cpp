@@ -27,6 +27,7 @@ namespace {
 std::atomic_bool g_keep_running{true};
 constexpr auto kZmqRetryBackoff = std::chrono::seconds(1);
 
+// Make a best-effort attempt at connecting until upstream is ready.
 bool connect_with_retry(zmq::socket_t& socket, const std::string& endpoint) {
     int attempt = 1;
     while (g_keep_running.load()) {
@@ -46,6 +47,7 @@ bool connect_with_retry(zmq::socket_t& socket, const std::string& endpoint) {
     return false;
 }
 
+// Keep filenames filesystem-friendly (avoid spaces or exotic characters).
 std::string sanitize_filename(std::string value) {
     for (char& ch : value) {
         if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_' ||
@@ -56,6 +58,7 @@ std::string sanitize_filename(std::string value) {
     return value;
 }
 
+// Idempotent table creation so the logger can start from a blank directory.
 void ensure_schema(sqlite3* db) {
     static constexpr const char* sql = R"SQL(
         CREATE TABLE IF NOT EXISTS frames (
@@ -90,9 +93,38 @@ void ensure_schema(sqlite3* db) {
     }
 }
 
+// Shared logic to honor CLI flags, env overrides, and repo defaults.
+fs::path resolve_env_path(const std::string& cli_env_path,
+                          const char* env_override,
+                          const fs::path& root) {
+    if (!cli_env_path.empty()) {
+        return cli_env_path;
+    }
+    if (env_override != nullptr) {
+        return env_override;
+    }
+    return root / ".env";
+}
+
+// Create directories declared in config so later file writes do not fail.
+bool ensure_output_directories(const dist::common::DataLoggerConfig& cfg) {
+    try {
+        std::filesystem::create_directories(cfg.raw_image_dir);
+        std::filesystem::create_directories(cfg.annotated_image_dir);
+        if (!cfg.db_path.parent_path().empty()) {
+            std::filesystem::create_directories(cfg.db_path.parent_path());
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        spdlog::error("Failed to create storage directories: {}", ex.what());
+        return false;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Provide a minimal CLI so local testing is ergonomic.
     CLI::App app{"Data Logger - consumes processed frames and stores them"};
     std::string cli_env_path;
     std::string cli_log_level;
@@ -102,15 +134,11 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    // Load configuration from .env (CLI override takes precedence).
     dist::common::EnvLoader loader;
     const auto root = fs::current_path();
     const char* env_override = std::getenv("DIST_ENV_PATH");
-    fs::path env_path = root / ".env";
-    if (!cli_env_path.empty()) {
-        env_path = cli_env_path;
-    } else if (env_override != nullptr) {
-        env_path = env_override;
-    }
+    fs::path env_path = resolve_env_path(cli_env_path, env_override, root);
     if (!loader.load_from_file(env_path)) {
         spdlog::error("Failed to read environment file at {}", env_path.string());
         return 1;
@@ -124,17 +152,11 @@ int main(int argc, char** argv) {
 
     dist::common::install_signal_handlers(g_keep_running);
 
-    try {
-        fs::create_directories(config.logger.raw_image_dir);
-        fs::create_directories(config.logger.annotated_image_dir);
-        if (!config.logger.db_path.parent_path().empty()) {
-            fs::create_directories(config.logger.db_path.parent_path());
-        }
-    } catch (const std::exception& ex) {
-        spdlog::error("Failed to create storage directories: {}", ex.what());
+    if (!ensure_output_directories(config.logger)) {
         return 1;
     }
 
+    // Database bootstrap + schema creation.
     sqlite3* raw_db = nullptr;
     if (sqlite3_open(config.logger.db_path.string().c_str(), &raw_db) != SQLITE_OK) {
         spdlog::error("Unable to open database at {}: {}",
@@ -169,6 +191,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Networking stack (SUB socket facing the extractor pipeline).
     zmq::context_t context{1};
     zmq::socket_t sink{context, zmq::socket_type::sub};
     sink.set(zmq::sockopt::rcvhwm, 100);
@@ -187,6 +210,7 @@ int main(int argc, char** argv) {
 
     auto last_wait_log = std::chrono::steady_clock::now();
 
+    // Main receive/insert loop.
     while (g_keep_running.load()) {
         zmq::message_t header_msg;
         zmq::message_t descriptors_msg;
@@ -195,6 +219,7 @@ int main(int argc, char** argv) {
         bool has_annotated = false;
 
         try {
+            // Expect [header][descriptors][raw image][optional annotated image].
             if (!sink.recv(header_msg, zmq::recv_flags::none)) {
                 const auto now = std::chrono::steady_clock::now();
                 if (now - last_wait_log > std::chrono::seconds(5)) {
@@ -247,6 +272,7 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Pull frequently used metadata upfront for clarity.
         const auto source = header.value("source", nlohmann::json::object());
         const int frame_id = source.value("frame_id", -1);
         const int loop_iteration = source.value("loop_iteration", 0);
@@ -268,11 +294,13 @@ int main(int argc, char** argv) {
         const auto& descriptor_blob = descriptors_msg;
         const auto& image_blob = image_msg;
 
+        // Persist file names with monotonically increasing prefix.
         std::ostringstream oss;
         oss << "frame_" << std::setw(6) << std::setfill('0') << std::max(frame_id, 0) << "_"
             << sanitize_filename(processed_timestamp) << ".png";
         const fs::path image_path = config.logger.raw_image_dir / oss.str();
 
+        // Persist raw PNG to disk so downstream inspection is trivial.
         std::ofstream out(image_path, std::ios::binary);
         if (!out.good()) {
             spdlog::error("Failed to open {} for writing", image_path.string());
@@ -285,6 +313,7 @@ int main(int argc, char** argv) {
         fs::path annotated_path;
         bool annotated_saved = false;
         if (has_annotated && annotated_msg.size() > 0) {
+            // Annotated frames mirror the raw naming convention with suffix.
             std::ostringstream aoss;
             aoss << "frame_" << std::setw(6) << std::setfill('0') << std::max(frame_id, 0) << "_"
                  << sanitize_filename(processed_timestamp) << "_annotated.png";
@@ -304,12 +333,14 @@ int main(int argc, char** argv) {
             header["annotated_path"] = annotated_path.string();
         }
 
+        // Prepare SQLite statement for reuse before binding.
         sqlite3_reset(insert_stmt);
         sqlite3_clear_bindings(insert_stmt);
 
         const std::string metadata_dump = header.dump();
         const std::string created_at = dist::common::now_iso8601();
 
+        // Bind all values in positional order (matches INSERT statement).
         int bind_index = 1;
         sqlite3_bind_int(insert_stmt, bind_index++, frame_id);
         sqlite3_bind_int(insert_stmt, bind_index++, loop_iteration);

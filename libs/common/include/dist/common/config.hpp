@@ -7,10 +7,12 @@
 
 namespace dist::common {
 
+// Process-wide tuning knobs (log level, etc.).
 struct GlobalConfig {
     std::string log_level = "info";
 };
 
+// Parameters consumed by the image generator binary.
 struct ImageGeneratorConfig {
     std::filesystem::path input_dir;
     int loop_delay_ms = 100;
@@ -21,6 +23,7 @@ struct ImageGeneratorConfig {
     int queue_depth = 100;
 };
 
+// Parameters consumed by the feature extractor binary.
 struct FeatureExtractorConfig {
     std::string sub_endpoint;
     std::string pub_endpoint;
@@ -30,6 +33,7 @@ struct FeatureExtractorConfig {
     int queue_depth = 100;
 };
 
+// Parameters consumed by the data logger binary.
 struct DataLoggerConfig {
     std::string sub_endpoint;
     std::filesystem::path db_path;
@@ -44,6 +48,7 @@ struct AppConfig {
     DataLoggerConfig logger;
 };
 
+// Populate the strongly typed config structs from the dotenv loader.
 [[nodiscard]] AppConfig load_app_config(const EnvLoader& env,
                                         const std::filesystem::path& root_dir);
 

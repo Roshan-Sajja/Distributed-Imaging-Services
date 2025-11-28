@@ -2,6 +2,7 @@ add_executable(
     image_generator
     src/main.cpp)
 
+# Link against shared utility libs plus runtime dependencies.
 target_link_libraries(
     image_generator
     PRIVATE

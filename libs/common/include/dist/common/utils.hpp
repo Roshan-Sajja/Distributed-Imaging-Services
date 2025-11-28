@@ -15,6 +15,7 @@ namespace dist::common {
 [[nodiscard]] std::string now_iso8601();
 
 // Install SIGINT/SIGTERM handlers that flip the provided atomic flag to false.
+// This lets every binary reuse the same shutdown plumbing.
 void install_signal_handlers(std::atomic_bool& keep_running_flag);
 
 }  // namespace dist::common

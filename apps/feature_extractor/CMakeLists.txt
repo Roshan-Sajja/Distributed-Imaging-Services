@@ -2,6 +2,7 @@ add_executable(
     feature_extractor
     src/main.cpp)
 
+# Feature extractor depends on OpenCV + messaging stacks.
 target_link_libraries(
     feature_extractor
     PRIVATE

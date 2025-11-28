@@ -2,6 +2,7 @@ add_executable(
     data_logger
     src/main.cpp)
 
+# Logger links against SQLite in addition to the shared libs.
 target_link_libraries(
     data_logger
     PRIVATE

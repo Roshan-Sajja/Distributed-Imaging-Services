@@ -135,6 +135,23 @@ class SubscriberMonitor : public zmq::monitor_t {
 
 }  // namespace
 
+fs::path resolve_env_path(const std::string& cli_env_path,
+                          const char* env_override,
+                          const fs::path& root) {
+    if (!cli_env_path.empty()) {
+        return cli_env_path;
+    }
+    if (env_override != nullptr) {
+        return env_override;
+    }
+    return root / ".env";
+}
+
+void configure_logging(std::string_view level) {
+    spdlog::set_level(dist::common::level_from_string(level));
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+}
+
 int main(int argc, char** argv) {
     CLI::App app{"Feature Extractor - consumes frames, runs SIFT, republishes"};
     std::string cli_env_path;
@@ -146,15 +163,11 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    // Centralized configuration loading for a single source of truth.
     dist::common::EnvLoader loader;
     const auto root = fs::current_path();
     const char* env_override = std::getenv("DIST_ENV_PATH");
-    fs::path env_path = root / ".env";
-    if (!cli_env_path.empty()) {
-        env_path = cli_env_path;
-    } else if (env_override != nullptr) {
-        env_path = env_override;
-    }
+    fs::path env_path = resolve_env_path(cli_env_path, env_override, root);
     if (!loader.load_from_file(env_path)) {
         spdlog::error("Failed to read environment file at {}", env_path.string());
         return 1;
@@ -163,8 +176,7 @@ int main(int argc, char** argv) {
     const auto config = dist::common::load_app_config(loader, root);
     const auto resolved_level =
         cli_log_level.empty() ? config.global.log_level : cli_log_level;
-    spdlog::set_level(dist::common::level_from_string(resolved_level));
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+    configure_logging(resolved_level);
 
     std::size_t max_queue_depth = kDefaultQueueDepth;
     if (config.extractor.queue_depth > 0) {
@@ -177,6 +189,7 @@ int main(int argc, char** argv) {
 
     dist::common::install_signal_handlers(g_keep_running);
 
+    // SUB socket ingests frames from the generator.
     zmq::context_t context{1};
     zmq::socket_t subscriber{context, zmq::socket_type::sub};
     subscriber.set(zmq::sockopt::rcvtimeo, 500);
@@ -186,6 +199,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // PUB socket emits enriched frames for the logger.
     zmq::socket_t publisher{context, zmq::socket_type::pub};
     publisher.set(zmq::sockopt::sndhwm, 100);
     publisher.set(zmq::sockopt::sndtimeo, 1000);
@@ -207,6 +221,7 @@ int main(int argc, char** argv) {
     subscriber_monitor->start(publisher);
     monitor_guard.monitor = subscriber_monitor.get();
 
+    // Configure SIFT once; parameters come from the .env file.
     auto sift = cv::SIFT::create(
         config.extractor.sift_n_features > 0 ? config.extractor.sift_n_features : 0,
         3,
@@ -219,8 +234,10 @@ int main(int argc, char** argv) {
     spdlog::info("Publishing to {}", config.extractor.pub_endpoint);
     spdlog::info("Queue depth: {}", max_queue_depth);
 
+    // Periodically log if upstream is silent to aid debugging.
     auto last_wait_log = std::chrono::steady_clock::now();
     struct ProcessedFrame {
+        // Staged ZeroMQ parts ready to flush when the logger is available.
         std::string header_json;
         std::vector<std::uint8_t> descriptors;
         std::vector<std::uint8_t> image;
@@ -228,6 +245,7 @@ int main(int argc, char** argv) {
     };
     std::deque<ProcessedFrame> pending;
 
+    // Attempt to publish a processed frame; return false if downstream is blocked.
     const auto send_frame = [&](const ProcessedFrame& frame) -> bool {
         std::vector<zmq::message_t> multipart;
         multipart.emplace_back(frame.header_json);
@@ -261,8 +279,10 @@ int main(int argc, char** argv) {
         }
     };
 
+    // Double-loop flushes pending work whenever downstream catches up.
     while (g_keep_running.load()) {
         while (!pending.empty()) {
+            // Give downstream a chance to consume already-processed frames.
             if (subscriber_monitor->has_subscriber() && send_frame(pending.front())) {
                 pending.pop_front();
             } else {
@@ -321,6 +341,7 @@ int main(int argc, char** argv) {
         cv::Mat descriptors;
         sift->detectAndCompute(image, cv::noArray(), keypoints, descriptors);
 
+        // Capture keypoint metadata for optional downstream visualization.
         nlohmann::json keypoints_json = nlohmann::json::array();
         for (const auto& kp : keypoints) {
             keypoints_json.push_back({
@@ -377,10 +398,12 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Bundle descriptors, raw payload, and (optional) annotated overlay.
         ProcessedFrame processed{
             header.dump(), std::move(descriptor_bytes), std::move(encoded), std::move(annotated_bytes)};
 
         if (!subscriber_monitor->has_subscriber() || !send_frame(processed)) {
+            // Back-pressure: keep a bounded queue until the logger recovers.
             if (pending.size() >= max_queue_depth) {
                 spdlog::warn("Extractor queue full ({} frames); dropping oldest", max_queue_depth);
                 pending.pop_front();
@@ -393,6 +416,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Tear down sockets in the opposite order of creation.
     spdlog::info("Feature extractor shutting down");
     subscriber_monitor->stop();
     monitor_guard.monitor = nullptr;

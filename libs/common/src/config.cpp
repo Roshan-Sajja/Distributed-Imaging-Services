@@ -5,6 +5,7 @@
 namespace dist::common {
 
 namespace {
+// Helpers keep the parsing logic succinct and centralized.
 int to_int(const EnvLoader& env, std::string_view key, int fallback) {
     if (auto value = env.get(key)) {
         try {
@@ -45,7 +46,9 @@ std::filesystem::path to_path(const EnvLoader& env,
 AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& root_dir) {
     AppConfig cfg;
 
+    // Global defaults shared by every binary.
     cfg.global.log_level = env.get_or("APP_LOG_LEVEL", cfg.global.log_level);
+    // Image generator tuning knobs.
     cfg.generator.input_dir =
         to_path(env, "IMAGE_GENERATOR_INPUT_DIR", "./data/images", root_dir);
     cfg.generator.loop_delay_ms =
@@ -63,6 +66,7 @@ AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& roo
     cfg.generator.queue_depth =
         to_int(env, "IMAGE_GENERATOR_QUEUE_DEPTH", extractor_queue_fallback);
 
+    // Feature extractor tuning knobs.
     cfg.extractor.sub_endpoint =
         env.get_or("FEATURE_EXTRACTOR_SUB_ENDPOINT", "tcp://127.0.0.1:5555");
     cfg.extractor.pub_endpoint =
@@ -76,6 +80,7 @@ AppConfig load_app_config(const EnvLoader& env, const std::filesystem::path& roo
     cfg.extractor.queue_depth =
         to_int(env, "FEATURE_EXTRACTOR_QUEUE_DEPTH", cfg.extractor.queue_depth);
 
+    // Data logger tuning knobs.
     cfg.logger.sub_endpoint =
         env.get_or("DATA_LOGGER_SUB_ENDPOINT", "tcp://127.0.0.1:5556");
     cfg.logger.db_path =

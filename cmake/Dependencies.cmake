@@ -1,5 +1,6 @@
 include(FetchContent)
 
+# Pin third-party dependencies for repeatable builds.
 set(DIST_CLI11_TAG v2.4.2)
 set(DIST_SPDLOG_TAG v1.13.0)
 set(DIST_CPPZMQ_TAG v4.10.0)

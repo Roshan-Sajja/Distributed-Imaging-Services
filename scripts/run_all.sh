@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Lightweight supervisor that runs the three binaries with shared config.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 BIN_DIR="${BIN_DIR:-${BUILD_DIR}/bin}"
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 for exe in image_generator feature_extractor data_logger; do
+    # Fail fast if somebody forgot to build.
     if [[ ! -x "${BIN_DIR}/${exe}" ]]; then
         echo "[run_all] Missing executable ${BIN_DIR}/${exe}. Run scripts/build.sh first." >&2
         exit 1
@@ -68,6 +70,7 @@ if [[ "${GENERATE_ONCE}" == true ]]; then
 fi
 
 cleanup() {
+    # Ensure child processes exit when the script is interrupted.
     for pid in "${PIDS[@]:-}"; do
         if kill -0 "${pid}" >/dev/null 2>&1; then
             kill "${pid}" 2>/dev/null || true
@@ -77,6 +80,7 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+# Launch order: logger -> extractor -> generator to avoid dropping frames.
 ("${BIN_DIR}/data_logger") &
 PIDS+=($!)
 if [[ ${#FE_ARGS[@]} -gt 0 ]]; then

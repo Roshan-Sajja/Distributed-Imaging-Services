@@ -9,6 +9,7 @@ add_library(dist::common ALIAS dist_common)
 
 target_include_directories(dist_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Shared helpers are header-only aside from the compilation units above.
 target_link_libraries(
     dist_common
     PUBLIC

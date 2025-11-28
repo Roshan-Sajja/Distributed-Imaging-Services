@@ -10,7 +10,7 @@ namespace {
 [[nodiscard]] bool is_comment_or_empty(std::string_view line) {
     for (char c : line) {
         if (c == '#') {
-            return true;
+            return true;  // treat inline comments as whole-line comments
         }
         if (!std::isspace(static_cast<unsigned char>(c))) {
             return false;

@@ -14,6 +14,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -142,6 +143,23 @@ std::vector<fs::path> collect_images(const fs::path& dir) {
     return images;
 }
 
+fs::path resolve_env_path(const std::string& cli_env_path,
+                          const char* env_override,
+                          const fs::path& root) {
+    if (!cli_env_path.empty()) {
+        return cli_env_path;
+    }
+    if (env_override != nullptr) {
+        return env_override;
+    }
+    return root / ".env";
+}
+
+void configure_logging(std::string_view level) {
+    spdlog::set_level(dist::common::level_from_string(level));
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -155,15 +173,11 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    // Centralized configuration loading for a single source of truth.
     dist::common::EnvLoader loader;
     const auto root = fs::current_path();
     const char* env_override = std::getenv("DIST_ENV_PATH");
-    fs::path env_path = root / ".env";
-    if (!cli_env_path.empty()) {
-        env_path = cli_env_path;
-    } else if (env_override != nullptr) {
-        env_path = env_override;
-    }
+    fs::path env_path = resolve_env_path(cli_env_path, env_override, root);
 
     if (!loader.load_from_file(env_path)) {
         spdlog::error("Failed to read environment file at {}", env_path.string());
@@ -174,8 +188,7 @@ int main(int argc, char** argv) {
     const auto resolved_level =
         cli_log_level.empty() ? config.global.log_level : cli_log_level;
 
-    spdlog::set_level(dist::common::level_from_string(resolved_level));
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+    configure_logging(resolved_level);
 
     spdlog::info("[image_generator] Dist Imaging Services v{}", dist::common::version());
     spdlog::info("Input directory: {}", config.generator.input_dir.string());
@@ -201,8 +214,10 @@ int main(int argc, char** argv) {
         }
     };
 
+    // Track downstream subscribers so we can buffer intelligently.
     auto monitor = std::make_unique<SubscriberMonitor>();
     MonitorGuard monitor_guard{monitor.get()};
+    // Preload the dataset once so we can detect missing files early.
     auto images = collect_images(config.generator.input_dir);
     if (images.empty()) {
         spdlog::error("No readable images found under {}", config.generator.input_dir.string());
@@ -211,6 +226,7 @@ int main(int argc, char** argv) {
 
     dist::common::install_signal_handlers(g_keep_running);
 
+    // PUB socket drives the entire pipeline.
     zmq::context_t context{1};
     zmq::socket_t publisher{context, zmq::socket_type::pub};
     publisher.set(zmq::sockopt::sndhwm, 10);
@@ -249,8 +265,10 @@ int main(int argc, char** argv) {
     auto last_heartbeat = std::chrono::steady_clock::now();
     std::deque<std::pair<std::string, std::vector<uchar>>> pending_frames;
 
+    // Drive the dataset in a loop (or single pass with --once).
     while (g_keep_running.load()) {
         if (monitor->has_subscriber() && !pending_frames.empty()) {
+            // Flush backlog so late subscribers get context immediately.
             spdlog::info("Flushing {} queued frames to new subscriber", pending_frames.size());
             while (!pending_frames.empty() && monitor->has_subscriber()) {
                 auto [header_str, encoded] = std::move(pending_frames.front());
@@ -273,6 +291,7 @@ int main(int argc, char** argv) {
                 break;
             }
 
+            // Read, encode, and publish each frame with metadata.
             const auto frame = cv::imread(image_path.string(), cv::IMREAD_COLOR);
             if (frame.empty()) {
                 spdlog::warn("Failed to decode image {}", image_path.string());
@@ -309,6 +328,7 @@ int main(int argc, char** argv) {
             const std::string header_str = header.dump();
 
             if (!monitor->has_subscriber()) {
+                // Hold onto the frame until someone subscribes (bounded queue).
                 if (pending_frames.size() >= max_queue_depth) {
                     spdlog::warn("Queue full ({} frames); dropping oldest queued frame", max_queue_depth);
                     pending_frames.pop_front();
@@ -343,6 +363,7 @@ int main(int argc, char** argv) {
             const auto now = std::chrono::steady_clock::now();
             if (heartbeat_interval.count() > 0 &&
                 now - last_heartbeat >= heartbeat_interval) {
+                // Lightweight observability for long-running sessions.
                 spdlog::info("Heartbeat: frames sent={}, loop_iteration={}",
                              frame_id,
                              loop_iteration);
@@ -356,6 +377,7 @@ int main(int argc, char** argv) {
         ++loop_iteration;
     }
 
+    // Tidy up in reverse order to avoid dangling ZeroMQ resources.
     spdlog::info("Generator shutting down (frames sent: {})", frame_id);
     monitor->stop();
     monitor_guard.monitor = nullptr;
