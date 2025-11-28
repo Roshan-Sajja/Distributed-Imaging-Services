@@ -44,25 +44,21 @@ Common flags:
 - `--annotated` (feature_extractor / run_all): emit annotated frames; the logger will write them to `storage/annotated_frames`.
 
 ## Docker
-I baked the code and .env into the image at `/app`.
+We bake the code and `.env` into the image at `/app`. The published image uses the sample images from the repo. For your own images, use the local setup (or rebuild the image with your data).
 
-Build and run:
+Pull and run (published arm64 image):
+```bash
+docker pull roshansajja/dist-imaging:1.0.0
+docker run --rm -v "$PWD/storage":/app/storage roshansajja/dist-imaging:1.0.0
+```
+
+Build and run locally (uses your working tree; outputs stay on host via the compose bind):
 ```bash
 docker compose build --no-cache dist-imaging
 docker compose up dist-imaging
 ```
 
-Keep outputs on the host (already set in compose):
-- Host `./storage` is mounted to `/app/storage` in the container.
-
-Run the pushed image elsewhere (example):
-```bash
-mkdir -p storage
-docker run --rm \
-  -v "$PWD/storage":/app/storage \
-  roshansajja/dist-imaging:1.0.0
-```
-Mount a different env to override the baked one:
+Override the baked `.env` if needed:
 ```bash
 docker run --rm \
   -v "$PWD/storage":/app/storage \
