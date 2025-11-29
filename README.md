@@ -1,6 +1,8 @@
 # Distributed Imaging Services
 
 A small C++ pipeline that streams images over ZeroMQ, extracts SIFT features, and logs results to disk/SQLite. You can run it locally or with Docker.
+![My First Board (1)](https://github.com/user-attachments/assets/6b15c22f-28c6-432f-8e7a-336980a56f77)
+
 
 ## Prerequisites (local build)
 - C++20 compiler (clang++-17 or g++-12+)
@@ -69,4 +71,5 @@ docker run --rm \
 ## Notes
 - `DIST_ENV_PATH` can override the `.env` location.
 - Use `--log-level` on any binary to override log verbosity.
+
 - If you add new dependencies, install them in both your host and the Dockerfile.
