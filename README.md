@@ -3,7 +3,7 @@
 A small C++ pipeline that streams images over ZeroMQ, extracts SIFT features, and logs results to disk/SQLite. You can run it locally or with Docker.
 ![My First Board (1)](https://github.com/user-attachments/assets/6b15c22f-28c6-432f-8e7a-336980a56f77)
 
-##Demo
+## Demo
 https://www.youtube.com/watch?v=kraSbLfyeqM&t=157s
 
 
